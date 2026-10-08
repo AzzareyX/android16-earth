@@ -1,0 +1,141 @@
+name: Build Redmi 12C Kernel
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build earth kernel
+    runs-on: ubuntu-24.04
+
+    steps:
+
+      - name: Checkout source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            bc \
+            bison \
+            build-essential \
+            cpio \
+            flex \
+            libelf-dev \
+            libssl-dev \
+            libdw-dev \
+            dwarves \
+            python3 \
+            rsync \
+            unzip \
+            zip \
+            clang \
+            llvm \
+            lld \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            binutils-aarch64-linux-gnu
+
+      - name: Check source
+        run: |
+          echo "=== Repository ==="
+          git remote -v
+
+          echo
+          echo "=== Branch ==="
+          git branch --show-current
+
+          echo
+          echo "=== Kernel Makefile ==="
+          head -n 15 Makefile
+
+      - name: Check earth configuration
+        run: |
+          test -f arch/arm64/configs/earth_defconfig
+          echo "earth_defconfig found."
+
+      - name: Generate kernel configuration
+        run: |
+          mkdir -p out
+
+          make \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+            earth_defconfig
+
+      - name: Show kernel configuration
+        run: |
+          echo "=== Kernel version ==="
+          make -s O=out kernelversion
+
+          echo
+          echo "=== Local version ==="
+          grep CONFIG_LOCALVERSION out/.config || true
+
+          echo
+          echo "=== Android configuration ==="
+          grep -E \
+            'CONFIG_ANDROID|CONFIG_BINDER|CONFIG_SELINUX|CONFIG_CGROUP' \
+            out/.config || true
+
+      - name: Build kernel
+        run: |
+          make \
+            -j$(nproc) \
+            O=out \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            CROSS_COMPILE=aarch64-linux-gnu- \
+            CROSS_COMPILE_COMPAT=arm-linux-gnueabi-
+
+      - name: Verify build
+        run: |
+          echo "=== Boot directory ==="
+          ls -lah out/arch/arm64/boot/
+
+          echo
+          echo "=== Image ==="
+          file out/arch/arm64/boot/Image || true
+
+          echo
+          echo "=== Image.gz ==="
+          file out/arch/arm64/boot/Image.gz || true
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts
+
+          cp out/arch/arm64/boot/Image \
+             artifacts/Image
+
+          if [ -f out/arch/arm64/boot/Image.gz ]; then
+            cp out/arch/arm64/boot/Image.gz \
+               artifacts/Image.gz
+          fi
+
+          cp out/.config \
+             artifacts/earth.config
+
+          cp out/System.map \
+             artifacts/System.map
+
+          cp out/vmlinux \
+             artifacts/vmlinux
+
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: Redmi12C-earth-baseline
+          path: artifacts/
