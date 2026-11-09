@@ -1,0 +1,151 @@
+name: Build Earth kernel (CIP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch yang akan dibuild, atau branch dasar saat merge CIP"
+        default: "lineage-23.2"
+        required: true
+      cip_tag:
+        description: "Tag CIP yang akan di-merge"
+        default: "v4.19.325-cip136"
+        required: true
+      merge_cip:
+        description: "Merge tag CIP sebelum build"
+        type: boolean
+        default: true
+      push_branch:
+        description: "Push branch hasil merge ke origin"
+        type: boolean
+        default: false
+      package_zip:
+        description: "Buat zip flashable AnyKernel3"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge CIP
+        if: inputs.merge_cip
+        run: |
+          git remote add cip https://git.kernel.org/pub/scm/linux/kernel/git/cip/linux-cip.git 2>/dev/null || \
+            git remote set-url cip https://git.kernel.org/pub/scm/linux/kernel/git/cip/linux-cip.git
+          git fetch cip --tags
+          git switch -C "cip/${{ inputs.cip_tag }}"
+          git merge --no-ff --no-edit "${{ inputs.cip_tag }}"
+
+      - name: Verify CIP version
+        if: inputs.merge_cip
+        run: |
+          test "$(cat localversion-cip)" = "-cip136"
+          test "$(cat localversion-st)" = "-st20"
+          cat localversion-cip localversion-st
+
+      - name: Push merged branch
+        if: inputs.merge_cip && inputs.push_branch
+        run: git push -u origin "cip/${{ inputs.cip_tag }}"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get clean
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-17 lld-17 llvm-17 gcc-aarch64-linux-gnu \
+            bc flex bison make libssl-dev libelf-dev libyaml-dev \
+            zip unzip python3
+
+      - name: Build kernel
+        run: |
+          export PATH="/usr/lib/llvm-17/bin:$PATH"
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export READELF=llvm-readelf
+          export STRIP=llvm-strip
+          export CROSS_COMPILE=aarch64-linux-gnu-
+
+          make -j"$(nproc)" O=out earth_defconfig
+          make -j"$(nproc)" O=out Image.gz-dtb
+          make O=out kernelrelease | tee out/kernelrelease.txt
+
+      - name: Package AnyKernel3
+        if: inputs.package_zip
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git ak3
+          cp out/arch/arm64/boot/Image.gz-dtb ak3/
+
+          cat > ak3/anykernel.sh <<'AK3'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          properties() { '
+          kernel.string=Earth Kernel CIP136
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=earth
+          device.name2=
+          device.name3=
+          device.name4=
+          device.name5=
+          supported.versions=
+          supported.patchlevels=
+          '; }
+
+          BLOCK=/dev/block/by-name/boot;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+
+          . tools/ak3-core.sh;
+
+          dump_boot;
+          write_boot;
+          AK3
+
+          SHORT="$(git rev-parse --short HEAD)"
+          (cd ak3 && zip -r9 "../kernel-earth-${SHORT}.zip" . -x '*.git*' '*.github*')
+          ls -lh kernel-earth-*.zip
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: earth-${{ inputs.cip_tag }}
+          path: |
+            out/arch/arm64/boot/Image.gz-dtb
+            out/kernelrelease.txt
+            out/.config
+            kernel-earth-*.zip
+          if-no-files-found: warn
